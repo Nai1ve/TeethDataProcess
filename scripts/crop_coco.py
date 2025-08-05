@@ -6,7 +6,7 @@ from torchvision.transforms.v2.functional import crop_image
 from tqdm import tqdm
 from pycocotools.coco import COCO
 
-def crop_coco_dataset(anno_path,img_dir,output_dir,top_ratio = 0.23 ,left_ratio = 0.15,right_ratio = 0.15):
+def crop_coco_dataset(anno_path,output_anno_path,img_dir,output_dir,top_ratio = 0.23 ,left_ratio = 0.15,right_ratio = 0.15):
     """
     裁剪COCO数据集图像并调整标注框
     :param anno_path: COCO标注文件路径
@@ -102,3 +102,4 @@ def crop_coco_dataset(anno_path,img_dir,output_dir,top_ratio = 0.23 ,left_ratio 
 
     print(f"Processing complete! Cropped images saved to: {os.path.join(output_dir, 'images')}")
     print(f"Updated annotations saved to: {new_anno_path}")
+    return new_anno_path

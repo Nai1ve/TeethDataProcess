@@ -17,9 +17,8 @@ if __name__ == '__main__':
     img_path = 'data/child'
 
     img_crop_path = 'data/dataset/coco/crop_child'
-
     # 2.对coco数据进行裁剪,重新生成
-    crop_coco.crop_coco_dataset(coco_merge_path, img_path, img_crop_path)
+    coco_crop_merge_path = crop_coco.crop_coco_dataset(coco_merge_path, img_path, img_crop_path)
     img_crop_preprocessing_path = 'data/dataset/coco/crop_child/preprocessing_images'
     # 3.对数据进行增强
     dental_preprocessing.dental_preprocessing_pipeline(os.path.join(img_crop_path,'images'), img_crop_preprocessing_path)
@@ -32,5 +31,5 @@ if __name__ == '__main__':
 
     # 5.对coco数据集进行划分
     coco_split_ann_path = 'data/dataset/coco/crop_child/annotations'
-    split_coco_dataset.split_coco_dataset(coco_merge_path, coco_split_ann_path)
+    split_coco_dataset.split_coco_dataset(coco_crop_merge_path, coco_split_ann_path)
 
