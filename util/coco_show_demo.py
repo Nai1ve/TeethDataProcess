@@ -4,7 +4,7 @@ import os
 
 dataset_dir = '../data/dataset/coco/crop_child/'
 
-ann_file_path = os.path.join(dataset_dir,'annotations' ,'annotations.json')
+ann_file_path = os.path.join(dataset_dir,'annotations' ,'val.json')
 
 coco = COCO(ann_file_path)
 
