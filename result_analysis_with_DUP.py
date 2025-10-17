@@ -12,7 +12,7 @@ GNN_RESULTS_PATH = 'gnn_corrected_results.pkl'
 PKL_FILE_PATH = 'teeth_results_ap.pkl'
 YOLO_JSON_PATH = 'best_predictions.json'
 
-ANNOTATION_FILE_PATH = r'data/dataset/coco/crop_child/annotations/test_n.json'
+ANNOTATION_FILE_PATH = r'data/dataset/coco/crop_child/annotations/test.json'
 
 
 IMAGE_ROOT_DIR = r'data/dataset/coco/crop_child/preprocessing_images'
