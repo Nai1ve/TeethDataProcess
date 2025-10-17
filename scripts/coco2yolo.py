@@ -2,17 +2,15 @@ import json
 import os
 import random
 import shutil
-import argparse
 from tqdm import tqdm
 import yaml
-from PIL import Image, ImageDraw
-import numpy as np
 
 
 def coco_to_yolo_dataset(
         coco_json_path,
         image_dir,
         output_dir,
+        splits,
         ratios=(0.8, 0.1, 0.1),
         seed=34,
 ):
@@ -76,18 +74,18 @@ def coco_to_yolo_dataset(
 
     # 4. 随机划分图像
     all_image_ids = list(image_id_to_info.keys())
-    random.seed(seed)
-    random.shuffle(all_image_ids)
+    # random.seed(seed)
+    # random.shuffle(all_image_ids)
 
     total_images = len(all_image_ids)
-    train_end = int(ratios[0] * total_images)
-    val_end = train_end + int(ratios[1] * total_images)
+    # train_end = int(ratios[0] * total_images)
+    # val_end = train_end + int(ratios[1] * total_images)
 
-    splits = {
-        'train': all_image_ids[:train_end],
-        'val': all_image_ids[train_end:val_end],
-        'test': all_image_ids[val_end:]
-    }
+    # splits = {
+    #     'train': all_image_ids[:train_end],
+    #     'val': all_image_ids[train_end:val_end],
+    #     'test': all_image_ids[val_end:]
+    # }
 
 
 

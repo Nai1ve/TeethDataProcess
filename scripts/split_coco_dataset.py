@@ -1,69 +1,69 @@
 import json
 import random
+from pathlib import Path
+from typing import Dict, List, Any
 from pycocotools.coco import COCO
 
 
-def split_coco_dataset(annotation_path, output_dir, ratios=(0.8, 0.1, 0.1), seed=42):
-    """
-    划分 COCO 数据集，生成训练集、验证集和测试集的 JSON 文件
-    :param annotation_path: 原始 COCO 标注文件路径（如 instances_train2017.json）
-    :param output_dir: 输出目录
-    :param ratios: 比例元组 (train_ratio, val_ratio, test_ratio)，总和需为 1
-    :param seed: 随机种子，确保可复现
-    """
-    # 设置随机种子
-    random.seed(seed)
 
-    # 加载原始标注
-    coco = COCO(annotation_path)
+def _create_json_files(
+    full_coco_data: Dict[str, Any],
+    split_definition: Dict[str, List[int]],
+    output_dir: Path
+) -> None:
+    for subset_name, subset_ids in split_definition.items():
+        print(f"\n  正在生成 '{subset_name}.json'...")
+        subset_id_set = set(subset_ids)
+        subset_images = [img for img in full_coco_data['images'] if img['id'] in subset_id_set]
+        subset_annotations = [ann for ann in full_coco_data['annotations'] if ann['image_id'] in subset_id_set]
+        subset_data = {"info": full_coco_data.get("info", {}), "licenses": full_coco_data.get("licenses", []), "categories": full_coco_data["categories"], "images": subset_images, "annotations": subset_annotations}
+        output_path = output_dir / f"{subset_name}.json"
+        with open(output_path, 'w', encoding='utf-8') as f:
+            json.dump(subset_data, f, indent=4)
+        print(f"  ✅ 已生成 '{subset_name}.json': {len(subset_images)} 张图片, {len(subset_annotations)} 个标注。")
+
+
+def create_coco_efficiency_files(
+        annotation_path: Path,
+        output_dir: Path,
+        master_split: Dict[str, List[int]],
+        percentages: List[int] = [20, 40, 60, 80, 100]
+) -> None:
+    """
+    接收一个预先划分好的ID字典，为COCO数据集生成效率实验文件。
+
+    :param annotation_path: 原始COCO完整标注文件的路径。
+    :param output_dir: 输出目录。
+    :param master_split: 预先划分好的ID字典，必须包含 'train_pool', 'val', 'test' 键。
+    :param percentages: 需要生成的训练集百分比列表。
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    print(f"正在加载原始COCO标注文件: {annotation_path}")
+    coco = COCO(str(annotation_path))
     data = coco.dataset
+    print("加载完成。")
 
-    # 获取所有图像 ID 并打乱顺序
-    img_ids = [img['id'] for img in data['images']]
-    random.shuffle(img_ids)
+    # 从master_split中提取ID
+    val_ids = master_split['val']
+    test_ids = master_split['test']
+    train_pool_ids = master_split['train']
 
-    # 计算各子集数量
-    total = len(img_ids)
-    num_train = int(total * ratios[0])
-    num_val = int(total * ratios[1])
-    num_test = total - num_train - num_val
+    # 生成固定的验证集和测试集JSON
+    print("\n正在生成固定的COCO验证集和测试集文件...")
+    _create_json_files(data, {'val': val_ids, 'test': test_ids}, output_dir)
 
-    # 划分图像 ID
-    train_ids = img_ids[:num_train]
-    val_ids = img_ids[num_train:num_train + num_val]
-    test_ids = img_ids[num_train + num_val:]
+    # 根据百分比生成训练集JSON
+    print("\n正在根据百分比生成COCO训练集文件...")
+    random.shuffle(train_pool_ids)  # 再次打乱以保证切片的随机性
 
-    # 构建子集标注数据
-    subsets = {
-        'train': train_ids,
-        'val': val_ids,
-        'test': test_ids
-    }
+    for p in sorted(percentages):
+        num_to_sample = int(len(train_pool_ids) * (p / 100))
+        subset_train_ids = train_pool_ids[:num_to_sample]
+        subset_name = f"train_{p}"
+        _create_json_files(data, {subset_name: subset_train_ids}, output_dir)
 
-    for subset_name, subset_ids in subsets.items():
-        # 筛选图像
-        subset_images = [img for img in data['images'] if img['id'] in subset_ids]
-
-        # 筛选标注（仅保留子集图像中的标注）
-        subset_annotations = [
-            ann for ann in data['annotations']
-            if ann['image_id'] in subset_ids
-        ]
-
-        # 构建子集 JSON 结构
-        subset_data = {
-            "info": data.get("info", {}),
-            "licenses": data.get("licenses", []),
-            "categories": data["categories"],  # 保留所有类别
-            "images": subset_images,
-            "annotations": subset_annotations
-        }
-
-        # 保存子集 JSON
-        output_path = f"{output_dir}/{subset_name}.json"
-        with open(output_path, 'w') as f:
-            json.dump(subset_data, f)
-        print(f"已生成 {subset_name} 集: {len(subset_ids)} 张图片, {len(subset_annotations)} 个标注")
+    print("\n🎉 所有COCO效率实验数据集已生成完毕！")
 
 
 if __name__ == '__main__':
@@ -78,7 +78,3 @@ if __name__ == '__main__':
     annotation_path = '../data/dataset/coco/crop_child/annotations/merged_annotations.json'
     output_dir = '../data/dataset/coco/crop_child/annotations'
 
-    split_coco_dataset(
-        annotation_path=annotation_path,
-        output_dir=output_dir,
-    )

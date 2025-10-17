@@ -7,6 +7,7 @@ from collections import defaultdict
 
 
 # --- 路径和配置 ---
+GNN_RESULTS_PATH = 'gnn_corrected_results.pkl'
 PKL_FILE_PATH = 'teeth_results_ap.pkl'
 YOLO_JSON_PATH = 'best_predictions.json'
 
@@ -16,7 +17,8 @@ ANNOTATION_FILE_PATH = r'data/dataset/coco/crop_child/annotations/test.json'
 IMAGE_ROOT_DIR = r'data/dataset/coco/crop_child/preprocessing_images'
 
 # 用于保存可视化结果的输出文件夹
-OUTPUT_VIS_DIR = 'analysis_visualization_results'
+#OUTPUT_VIS_DIR = 'analysis_visualization_results'
+OUTPUT_VIS_DIR = 'analysis_comparison_visualization'
 
 CLASS_NAMES = [
     '11', '12', '13', '14', '15', '16', '17',
@@ -56,6 +58,126 @@ def calculate_iou(boxA, boxB):
 
 
 
+def evaluate_predictions_for_image(pred_list, gt_anns, coco_id_to_name, model_idx_to_name):
+    """
+    对单张图片的预测列表进行评估，返回详细的错误分类。
+    Args:
+        pred_list (list): 包含 {'bbox': ..., 'score': ..., 'label_idx': ...} 的列表
+        gt_anns (list): COCO格式的真实标注列表
+    Returns:
+        dict: 包含TP, FN, FP_CLASS等详细信息的字典
+    """
+    # 准备GT数据
+    gt_bboxes = np.array([ann['bbox'] for ann in gt_anns])
+    gt_labels_coco_id = np.array([ann['category_id'] for ann in gt_anns])
+    if gt_bboxes.shape[0] > 0:
+        gt_bboxes[:, 2] += gt_bboxes[:, 0]
+        gt_bboxes[:, 3] += gt_bboxes[:, 1]
+
+    # 准备预测数据
+    pred_bboxes = np.array([p['bbox'] for p in pred_list])
+    pred_scores = np.array([p['score'] for p in pred_list])
+    pred_labels_model_idx = np.array([p['label_idx'] for p in pred_list])
+
+    # 初始化状态追踪
+    gt_matched = np.zeros(gt_bboxes.shape[0], dtype=bool)
+
+    # 初始化结果存储
+    results = {
+        'TPs': [], 'FNs': [], 'FP_CLASS': [], 'FP_HALLU': [], 'DUPs': [],
+        'confusion_pairs': defaultdict(int)
+    }
+
+    if len(pred_bboxes) > 0:
+        sorted_pred_indices = np.argsort(pred_scores)[::-1]
+    else:
+        sorted_pred_indices = []
+
+    # --- "三步判定法" ---
+    for p_idx in sorted_pred_indices:
+        pred_box = pred_bboxes[p_idx]
+        pred_label_name = model_idx_to_name[pred_labels_model_idx[p_idx]]
+        pred_score = pred_scores[p_idx]
+
+        if gt_bboxes.shape[0] == 0:
+            results['FP_HALLU'].append({'p_box': pred_box, 'pred_label': pred_label_name, 'score': pred_score})
+            continue
+
+        ious = np.array([calculate_iou(pred_box, gt_box) for gt_box in gt_bboxes])
+        best_gt_idx = np.argmax(ious)
+        max_iou = ious[best_gt_idx]
+
+        gt_label_name = coco_id_to_name[gt_labels_coco_id[best_gt_idx]]
+
+        if max_iou < IOU_THRESHOLD:
+            results['FP_HALLU'].append({'p_box': pred_box, 'pred_label': pred_label_name, 'score': pred_score})
+        else:
+            if pred_label_name == gt_label_name:
+                if not gt_matched[best_gt_idx]:
+                    results['TPs'].append({'p_box': pred_box, 'label': pred_label_name, 'score': pred_score})
+                    gt_matched[best_gt_idx] = True
+                else:
+                    results['DUPs'].append({'p_box': pred_box, 'pred_label': pred_label_name, 'score': pred_score})
+            else:
+                results['FP_CLASS'].append(
+                    {'p_box': pred_box, 'pred_label': pred_label_name, 'gt_label': gt_label_name, 'score': pred_score})
+                results['confusion_pairs'][f"(Pred:{pred_label_name} -> GT:{gt_label_name})"] += 1
+
+    # 收集漏检 (FN)
+    for gt_idx, is_matched in enumerate(gt_matched):
+        if not is_matched:
+            gt_label_name = coco_id_to_name[gt_labels_coco_id[gt_idx]]
+            results['FNs'].append({'gt_box': gt_bboxes[gt_idx], 'gt_label': gt_label_name})
+
+    return results
+
+
+# --- 打印报告的函数 ---
+def print_report(title, stats):
+    print("\n\n" + "=" * 50)
+    print(f"--- {title} ---")
+    print("=" * 50)
+
+    total_tp = stats['total_TP']
+    total_dup = stats['total_DUP']
+    total_fn = stats['total_FN']
+    total_fp_class = stats['total_FP_CLASS']
+    total_fp_hallu = stats['total_FP_HALLU']
+    total_real_fps = total_fp_class + total_fp_hallu
+    total_gts = total_tp + total_fn
+
+    print(f"总计真阳性 (TPs): {total_tp}")
+    print(f"总计漏检 (FNs): {total_fn}")
+    print(f"总计有效真实标注 (GTs): {total_gts}")
+    print("-" * 20)
+    print(f"总计重复检测 (DUPs): {total_dup}")
+    print(f"总计真实假阳性 (Real FPs): {total_real_fps}")
+    print(f"   |-- 编号错误 (FP-Class): {total_fp_class}")
+    print(f"   |-- 无中生有 (FP-Hallucination): {total_fp_hallu}")
+    print("=" * 50)
+
+    # 指标一: FP 构成
+    percent_fp_class = total_fp_class / (total_real_fps + epsilon)
+    print("\n--- 指标一: FP 构成比例 ---")
+    print(f"  -> '编号错误' 占比: {percent_fp_class:.2%}")
+    print(f"  -> '无中生有' 占比: {1 - percent_fp_class:.2%}")
+
+    # 指标二: 临床编号准确率
+    numbering_accuracy = total_tp / (total_tp + total_fp_class + epsilon)
+    print("\n--- 指标二: 临床编号准确率 ---")
+    print(f"  编号准确率: {numbering_accuracy:.4f}  (或 {numbering_accuracy:.2%})")
+
+    # 指标三: 宏观性能
+    overall_precision = total_tp / (total_tp + total_real_fps + total_dup + epsilon)
+    overall_recall = total_tp / (total_gts + epsilon)
+    overall_f1 = 2 * (overall_precision * overall_recall) / (overall_precision + overall_recall + epsilon)
+    print("\n--- 指标三: 宏观性能指标 ---")
+    print(f"  宏观精确度 (Precision): {overall_precision:.4f}")
+    print(f"  宏观召回率 (Recall): {overall_recall:.4f}")
+    print(f"  宏观 F1 分数 (F1-Score): {overall_f1:.4f}")
+    print("=" * 50)
+
+
 def draw_box(image, box, label, color, thickness=2):
     """在图像上绘制一个带标签的边界框"""
     x1, y1, x2, y2 = map(int, box)
@@ -74,350 +196,116 @@ def draw_box(image, box, label, color, thickness=2):
     return image
 
 
-
 def main():
     print("正在加载文件...")
-    with open(PKL_FILE_PATH, 'rb') as f:
-        results_list = pickle.load(f)
+    with open(GNN_RESULTS_PATH, 'rb') as f:
+        gnn_results = pickle.load(f)
     coco_gt = COCO(ANNOTATION_FILE_PATH)
-
-
-
     print("文件加载完成。")
 
     os.makedirs(OUTPUT_VIS_DIR, exist_ok=True)
-    print(f"可视化结果将保存到: {os.path.abspath(OUTPUT_VIS_DIR)}")
+    print(f"对比可视化结果将保存到: {os.path.abspath(OUTPUT_VIS_DIR)}")
 
-    print("正在创建类别数组索引和coco类别id的索引....")
+    # --- 准备标签映射 ---
     cat_ids = coco_gt.getCatIds(CLASS_NAMES)
     cats = coco_gt.loadCats(cat_ids)
-    cat_name_to_id = {cat['name']: cat['id'] for cat in cats}
-
-    coco_id_to_name = {v: k for k, v in cat_name_to_id.items()}
+    coco_id_to_name = {cat['id']: cat['name'] for cat in cats}
     model_idx_to_name = {i: name for i, name in enumerate(CLASS_NAMES)}
     print('标签映射创建完成....')
 
-
-    per_image_stats = {}
-
-
-    global_stats = {
-        'total_TP': 0,
-        'total_FP_CLASS': 0,
-        'total_FP_HALLU': 0,
-        'total_FN': 0,
-        'total_DUP': 0,
-        'total_GT': 0,
-        'confusion_pairs': defaultdict(int)  # 用于混淆矩阵
-    }
+    # --- [修改] 初始化两个全局统计字典 ---
+    global_stats_before = defaultdict(int)
+    global_stats_after = defaultdict(int)
+    global_stats_before['confusion_pairs'] = defaultdict(int)
+    global_stats_after['confusion_pairs'] = defaultdict(int)
 
     img_ids_in_gt = sorted(coco_gt.getImgIds())
     print(f"\n开始分析 {len(img_ids_in_gt)} 张图片...")
 
-    # 逐张图片进行处理
     for i, img_id in enumerate(img_ids_in_gt):
+        if img_id not in gnn_results:
+            continue
 
-        img_info = coco_gt.loadImgs(img_id)[0]
-        filename = img_info['file_name']
+        # --- 1. 准备数据 ---
+        img_info = gnn_results[img_id]
+        filename = os.path.basename(img_info['img_path'])
 
-
-        per_image_stats[img_id] = {
-            'filename': filename,
-            'TP_details': [],
-            'FP_CLASS_details': [],
-            'FP_HALLU_details': [],
-            'FN_details': [],
-            'DUP_details': []
-        }
-
-        img_path = os.path.join(IMAGE_ROOT_DIR, filename)
-        image = cv2.imread(img_path)
-        if image is None:
-            print(f"\n[警告] 无法加载图片: {img_path}. 将跳过此图片的可视化。")
-
-        pred_result = results_list[i]
-        assert pred_result['img_id'] == img_id, f"图片ID不匹配: GT={img_id}, Pred={pred_result['img_id']}"
-
-        # 获取预测结果并根据置信度阈值进行过滤
-        pred_instances = pred_result['pred_instances']
-        score_mask = pred_instances['scores'] >= SCORE_THRESHOLD
-        pred_bboxes = pred_instances['bboxes'][score_mask].cpu().numpy()
-        pred_labels_model_idx = pred_instances['labels'][score_mask].cpu().numpy()
-        pred_scores = pred_instances['scores'][score_mask].cpu().numpy()
-
-        # 获取真实标注
         ann_ids = coco_gt.getAnnIds(imgIds=img_id)
         gt_anns = coco_gt.loadAnns(ann_ids)
 
-        valid_gt_anns = [ann for ann in gt_anns if
-                         not ann.get('iscrowd', False) and ann['bbox'][2] > 0 and ann['bbox'][3] > 0]
-        gt_bboxes = np.array([ann['bbox'] for ann in valid_gt_anns])
-        gt_labels_coco_id = np.array([ann['category_id'] for ann in valid_gt_anns])
+        # --- 2. 创建 "Before" 和 "After" 两个预测列表 ---
+        preds_before = []
+        preds_after = []
 
-        # 累加GT总数
-        global_stats['total_GT'] += len(gt_bboxes)
-
-        if gt_bboxes.shape[0] > 0:
-            gt_bboxes[:, 2] += gt_bboxes[:, 0]
-            gt_bboxes[:, 3] += gt_bboxes[:, 1]
-
-
-        gt_matched = np.zeros(gt_bboxes.shape[0], dtype=bool)
-        pred_status = np.array(['UNACCOUNTED'] * len(pred_bboxes), dtype=object)
-
-        if len(pred_bboxes) > 0:
-            sorted_pred_indices = np.argsort(pred_scores)[::-1]
-        else:
-            sorted_pred_indices = []
-
-        # 遍历所有排序后的预测框
-        for p_idx in sorted_pred_indices:
-            pred_box = pred_bboxes[p_idx]
-            pred_label_model_idx = pred_labels_model_idx[p_idx]
-            pred_label_name = model_idx_to_name[pred_label_model_idx]
-
-            if gt_bboxes.shape[0] == 0:
-                pred_status[p_idx] = 'FP_HALLU'
-                continue
-
-            # 1. 寻找最佳空间匹配
-            ious = np.array([calculate_iou(pred_box, gt_box) for gt_box in gt_bboxes])
-            best_gt_idx = np.argmax(ious)
-            max_iou = ious[best_gt_idx]
-
-            best_gt_coco_id = gt_labels_coco_id[best_gt_idx]
-            if best_gt_coco_id in [54,53]:
-                continue
-
-            best_gt_label_name = coco_id_to_name[best_gt_coco_id]
-
-            # 2. & 3. 判断位置和标签
-            if max_iou < IOU_THRESHOLD:
-                pred_status[p_idx] = 'FP_HALLU'
-            else:
-                if pred_label_name == best_gt_label_name:
-                    if not gt_matched[best_gt_idx]:
-                        pred_status[p_idx] = 'TP'
-                        gt_matched[best_gt_idx] = True
-                    else:
-                        pred_status[p_idx] = 'DUP'
-                else:
-                    pred_status[p_idx] = 'FP_CLASS'
-
-
-
-        # 4.1 收集 FN (漏检)
-        unmatched_gt_indices = np.where(~gt_matched)[0]
-        for gt_idx in unmatched_gt_indices:
-            fn_box = gt_bboxes[gt_idx]
-            fn_label_id = gt_labels_coco_id[gt_idx]
-            if fn_label_id in [53,54]:
-                continue
-            fn_label_name = coco_id_to_name[fn_label_id]
-            per_image_stats[img_id]['FN_details'].append({
-                'gt_box': fn_box,
-                'gt_label': fn_label_name
+        for p in img_info['predictions']:
+            preds_before.append({
+                'bbox': p['bbox'],
+                'score': p['original_score'],
+                'label_idx': p['original_label_idx']
             })
-            global_stats['total_FN'] += 1  # 累加到全局FN
+            preds_after.append({
+                'bbox': p['bbox'],
+                'score': p['original_score'],  # 使用原始分数进行排序
+                'label_idx': p['corrected_label_idx']
+            })
 
-        # 4.2 遍历所有预测框的状态，填充详情
-        for p_idx, status in enumerate(pred_status):
-            pred_box = pred_bboxes[p_idx]
-            pred_label_name = model_idx_to_name[pred_labels_model_idx[p_idx]]
-            score = pred_scores[p_idx]
+        # --- 3. 分别评估 "Before" 和 "After" ---
+        results_train = evaluate_predictions_for_image(preds,gt_anns,coco_id_to_name, model_idx_to_name)
+        results_before = evaluate_predictions_for_image(preds_before, gt_anns, coco_id_to_name, model_idx_to_name)
+        results_after = evaluate_predictions_for_image(preds_after, gt_anns, coco_id_to_name, model_idx_to_name)
 
+        # --- 4. 累加全局统计数据 ---
+        for key in ['TPs', 'FNs', 'DUPs', 'FP_CLASS', 'FP_HALLU']:
+            global_stats_before[f'total_{key[:-1]}'] += len(results_before[key])
+            global_stats_after[f'total_{key[:-1]}'] += len(results_after[key])
+        for pair, count in results_before['confusion_pairs'].items():
+            global_stats_before['confusion_pairs'][pair] += count
+        for pair, count in results_after['confusion_pairs'].items():
+            global_stats_after['confusion_pairs'][pair] += count
 
-            if gt_bboxes.shape[0] > 0:
-                ious = np.array([calculate_iou(pred_box, gt_box) for gt_box in gt_bboxes])
-                best_gt_idx = np.argmax(ious)
-                max_iou = ious[best_gt_idx]
-                if gt_labels_coco_id[best_gt_idx] in [53,54]:
-                    continue
-                best_gt_label_name = coco_id_to_name[gt_labels_coco_id[best_gt_idx]]
-            else:
-                max_iou = 0
-                best_gt_label_name = "N/A"
-
-            if status == 'TP':
-                global_stats['total_TP'] += 1
-                per_image_stats[img_id]['TP_details'].append({
-                    'p_box': pred_box,
-                    'gt_box': gt_bboxes[best_gt_idx],
-                    'label_name': pred_label_name,
-                    'score': score,
-                    'iou': max_iou
-                })
-
-            elif status == 'DUP':
-                global_stats['total_DUP'] += 1
-                per_image_stats[img_id]['DUP_details'].append({
-                    'p_box': pred_box,
-                    'pred_label': pred_label_name,
-                    'gt_match_label': best_gt_label_name,
-                    'score': score
-                })
-
-            elif status == 'FP_CLASS':
-                global_stats['total_FP_CLASS'] += 1
-                global_stats['confusion_pairs'][f"(Pred:{pred_label_name} -> GT:{best_gt_label_name})"] += 1
-                per_image_stats[img_id]['FP_CLASS_details'].append({
-                    'p_box': pred_box,
-                    'pred_label': pred_label_name,
-                    'gt_match_label': best_gt_label_name,
-                    'score': score,
-                    'iou_with_gt': max_iou
-                })
-
-            elif status == 'FP_HALLU':
-                global_stats['total_FP_HALLU'] += 1
-                per_image_stats[img_id]['FP_HALLU_details'].append({
-                    'p_box': pred_box,
-                    'pred_label': pred_label_name,
-                    'score': score,
-                    'max_iou_any_gt': max_iou
-                })
-
-
-        if image is not None:
-            vis_image = image.copy()
-            stats_for_img = per_image_stats[img_id]
-
-            # 1. 绘制 FN (蓝色)
-            for fn in stats_for_img['FN_details']:
-                label = f"MISS: {fn['gt_label']}"
-                draw_box(vis_image, fn['gt_box'], label, COLOR_FN)
-
-            # 2. 绘制 FP-CLASS (红色)
-            for fp in stats_for_img['FP_CLASS_details']:
-                label = f"FP-CLASS: PRED {fp['pred_label']} (IS {fp['gt_match_label']}) S:{fp['score']:.2f}"
-                draw_box(vis_image, fp['p_box'], label, COLOR_FP_CLASS)
-
-            # 3. 绘制 FP-HALLU (亮红色)
-            for fp in stats_for_img['FP_HALLU_details']:
-                label = f"FP-HALLU: {fp['pred_label']} S:{fp['score']:.2f}"
-                draw_box(vis_image, fp['p_box'], label, COLOR_FP_HALLU)
-
-            # 4. 绘制 DUP (橙色)
-            for dup in stats_for_img['DUP_details']:
-                label = f"DUP: {dup['pred_label']} S:{dup['score']:.2f}"
-                draw_box(vis_image, dup['p_box'], label, COLOR_DUP)
-
-            # 5. 绘制 TP (绿色)
-            # for tp in stats_for_img['TP_details']:
-            #     label = f"TP: {tp['label_name']} ({tp['score']:.2f})"
-            #     draw_box(vis_image, tp['p_box'], label, COLOR_TP)
-
-            # 保存图像
-            output_filepath = os.path.join(OUTPUT_VIS_DIR, filename)
-            os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
-            cv2.imwrite(output_filepath, vis_image)
-
-
-
-    print("\n\n" + "=" * 40)
-    print("--- 核心错误构成分析 (Error Analysis Report) ---")
-    print("=" * 40)
-
-    total_tp = global_stats['total_TP']
-    total_dup = global_stats['total_DUP']
-    total_fn = global_stats['total_FN']
-    total_fp_class = global_stats['total_FP_CLASS']
-    total_fp_hallu = global_stats['total_FP_HALLU']
-    total_real_fps = total_fp_class + total_fp_hallu
-    total_gts = global_stats['total_GT']  # TPs + FNs
-
-    # 验证计数器
-    #assert total_gts == (total_tp + total_fn), f"GT计数错误! Total_GT:{total_gts} vs TP+FN:{total_tp + total_fn}"
-
-    print(f"总计真阳性 (Total TPs): {total_tp}")
-    print(f"总计漏检 (Total FNs): {total_fn}")
-    print(f"总计有效真实标注 (Total GTs): {total_gts}")
-    print("-" * 20)
-    print(f"总计重复检测 (Total DUPs): {total_dup}")
-    print(f"总计真实假阳性 (Total Real FPs): {total_real_fps}")
-    print(f"   |-- 编号错误 (FP-Classification): {total_fp_class}")
-    print(f"   |-- 无中生有 (FP-Hallucination): {total_fp_hallu}")
-    print("=" * 40)
-
-    # --- 指标一: FP 构成比例 (饼图数据) ---
-    percent_fp_class = total_fp_class / (total_real_fps + epsilon)
-    percent_fp_hallu = total_fp_hallu / (total_real_fps + epsilon)
-    print("\n--- 指标一: FP 构成比例 ---")
-    print(f"在所有 {total_real_fps} 个真实FP错误中:")
-    print(f"  -> '编号错误' 占比: {percent_fp_class:.2%} ({total_fp_class} 个)")
-    print(f"  -> '无中生有' 占比: {percent_fp_hallu:.2%} ({total_fp_hallu} 个)")
-
-    # --- 指标二: 临床编号准确率  ---
-    numbering_accuracy = total_tp / (total_tp + total_fp_class + epsilon)
-    print("\n--- 指标二: 临床编号准确率 (Numbering Accuracy) ---")
-    print(f"  定义: 在所有被框住的牙齿中(TP + FP-Class)，编号也正确的比例")
-    print(f"  计算: Total_TPs / (Total_TPs + Total_FP_Class)")
-    print(f"  编号准确率: {numbering_accuracy:.4f}  (或 {numbering_accuracy:.2%})")
-
-    # --- 指标三: 宏观性能指标 (用于参考) ---
-    overall_precision = total_tp / (total_tp + total_real_fps + total_dup + epsilon)
-    overall_recall = total_tp / (total_gts + epsilon)
-    overall_f1 = 2 * (overall_precision * overall_recall) / (overall_precision + overall_recall + epsilon)
-
-    print("\n--- 指标三: 宏观性能指标 (Overall Metrics) ---")
-    print(f"  (将 DUP 视为一种 FP 进行计算)")
-    print(f"  宏观精确度 (Overall Precision): {overall_precision:.4f}")
-    print(f"  宏观召回率 (Overall Recall): {overall_recall:.4f}")
-    print(f"  宏观 F1 分数 (Overall F1-Score): {overall_f1:.4f}")
-
-    # --- 指标四: 典型混淆对 ---
-    print("\n--- 指标四: 典型混淆对 (Top 10 Confusion Pairs) ---")
-    if not global_stats['confusion_pairs']:
-        print("未发现编号错误 (FP-Classification errors)。")
-    else:
-        sorted_confusion = sorted(global_stats['confusion_pairs'].items(), key=lambda item: item[1], reverse=True)
-        for pair, count in sorted_confusion[:10]:  # 打印前10个
-            print(f"  {pair:<30} : {count} 次")
-    print("=" * 40)
-
-
-    print("\n--- 每张图片的详细错误日志 (按总错误数排序) ---")
-    print(f"(详细可视化图像已保存在: {os.path.abspath(OUTPUT_VIS_DIR)})")
-
-    sorted_images = sorted(per_image_stats.items(),
-                           key=lambda item: len(item[1]['FP_CLASS_details']) + len(item[1]['FP_HALLU_details']) + len(
-                               item[1]['FN_details']) + len(item[1]['DUP_details']),
-                           reverse=True)
-
-    for img_id, stats in sorted_images:
-        total_errors = len(stats['FN_details']) + len(stats['FP_CLASS_details']) + len(stats['FP_HALLU_details']) + len(
-            stats['DUP_details'])
-        if total_errors == 0:
+        # --- 5. 拼接并保存可视化图像 ---
+        image = cv2.imread(os.path.join(IMAGE_ROOT_DIR, filename))
+        if image is None:
             continue
 
-        print("\n" + "=" * 80)
-        print(f"图片: {stats['filename']} (ID: {img_id})")
-        print(
-            f"    -> 摘要: 漏检(FN): {len(stats['FN_details'])}, 编号错误(FP-C): {len(stats['FP_CLASS_details'])}, 无中生有(FP-H): {len(stats['FP_HALLU_details'])}, 重复(DUP): {len(stats['DUP_details'])}")
+        vis_image_before = image.copy()
+        vis_image_after = image.copy()
 
-        if stats['FN_details']:
-            print("    [详细漏检 (FN)]: ")
-            for fn in stats['FN_details']:
-                print(f"      - [应检测] 类别: {fn['gt_label']:<5} @ 框: {[int(c) for c in fn['gt_box']]}")
+        # 绘制 "Before" 图像的错误
+        for fn in results_before['FNs']: draw_box(vis_image_before, fn['gt_box'], f"MISS: {fn['gt_label']}", COLOR_FN)
+        for fp in results_before['FP_CLASS']: draw_box(vis_image_before, fp['p_box'],
+                                                       f"FP-C: P:{fp['pred_label']} (is {fp['gt_label']})",
+                                                       COLOR_FP_CLASS)
+        for fp in results_before['FP_HALLU']: draw_box(vis_image_before, fp['p_box'], f"FP-H: {fp['pred_label']}",
+                                                       COLOR_FP_HALLU)
+        for dup in results_before['DUPs']: draw_box(vis_image_before, dup['p_box'], f"DUP: {dup['pred_label']}",
+                                                    COLOR_DUP)
 
-        if stats['FP_CLASS_details']:
-            print("    [详细编号错误 (FP-CLASS)]: ")
-            for fp in stats['FP_CLASS_details']:
-                print(
-                    f"      - [错误预测] 类别: {fp['pred_label']:<5} (真实应为: {fp['gt_match_label']}), 置信度: {fp['score']:.3f}, IoU: {fp['iou_with_gt']:.2f}")
+        # 绘制 "After" 图像的错误
+        for fn in results_after['FNs']: draw_box(vis_image_after, fn['gt_box'], f"MISS: {fn['gt_label']}", COLOR_FN)
+        for fp in results_after['FP_CLASS']: draw_box(vis_image_after, fp['p_box'],
+                                                      f"FP-C: P:{fp['pred_label']} (is {fp['gt_label']})",
+                                                      COLOR_FP_CLASS)
+        for fp in results_after['FP_HALLU']: draw_box(vis_image_after, fp['p_box'], f"FP-H: {fp['pred_label']}",
+                                                      COLOR_FP_HALLU)
+        for dup in results_after['DUPs']: draw_box(vis_image_after, dup['p_box'], f"DUP: {dup['pred_label']}",
+                                                   COLOR_DUP)
 
-        if stats['FP_HALLU_details']:
-            print("    [详细无中生有 (FP-HALLU)]: ")
-            for fp in stats['FP_HALLU_details']:
-                print(
-                    f"      - [错误预测] 类别: {fp['pred_label']:<5}, 置信度: {fp['score']:.3f}, 最大IoU: {fp['max_iou_any_gt']:.2f}")
+        # 添加标签
+        cv2.putText(vis_image_before, 'Before GNN (Faster R-CNN)', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1,
+                    (255, 255, 255), 2)
+        cv2.putText(vis_image_after, 'After GNN Correction', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-        if stats['DUP_details']:
-            print("    [详细重复检测 (DUP)]: ")
-            for dup in stats['DUP_details']:
-                print(
-                    f"      - [重复预测] 类别: {dup['pred_label']:<5} (目标: {dup['gt_match_label']}), 置信度: {dup['score']:.3f}")
-    print("=" * 80)
+        # 拼接图像
+        comparison_image = cv2.hconcat([vis_image_before, vis_image_after])
+
+        # 保存图像
+        output_filepath = os.path.join(OUTPUT_VIS_DIR, filename)
+        cv2.imwrite(output_filepath, comparison_image)
+
+    # --- 6. 打印最终的对比报告 ---
+    print_report("最终评估报告: Faster R-CNN 基线 (Before GNN)", global_stats_before)
+    print_report("最终评估报告: GNN 修正后 (After GNN)", global_stats_after)
 
 
 if __name__ == '__main__':
