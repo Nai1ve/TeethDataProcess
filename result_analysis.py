@@ -4,7 +4,7 @@ from pycocotools.coco import COCO
 
 
 PKL_FILE_PATH = 'raw_newdata.pkl'
-ANNOTATION_FILE_PATH = r'data/dataset/coco/crop_child/annotations/test.json'
+ANNOTATION_FILE_PATH = r'data/dataset/coco/crop_child/annotations/test_n.json'
 CLASS_NAMES = [
             '11','12','13','14','15','16','17',
             '21','22','23','24','25','26','27',

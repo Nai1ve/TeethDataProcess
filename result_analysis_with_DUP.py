@@ -1,5 +1,6 @@
 import pickle
 import numpy as np
+import torch
 from pycocotools.coco import COCO
 import cv2
 import os
@@ -11,7 +12,7 @@ GNN_RESULTS_PATH = 'gnn_corrected_results.pkl'
 PKL_FILE_PATH = 'teeth_results_ap.pkl'
 YOLO_JSON_PATH = 'best_predictions.json'
 
-ANNOTATION_FILE_PATH = r'data/dataset/coco/crop_child/annotations/test.json'
+ANNOTATION_FILE_PATH = r'data/dataset/coco/crop_child/annotations/test_n.json'
 
 
 IMAGE_ROOT_DIR = r'data/dataset/coco/crop_child/preprocessing_images'
@@ -198,13 +199,21 @@ def draw_box(image, box, label, color, thickness=2):
 
 def main():
     print("正在加载文件...")
-    with open(GNN_RESULTS_PATH, 'rb') as f:
-        gnn_results = pickle.load(f)
+    gnn_results_tensor_keys = torch.load(GNN_RESULTS_PATH,map_location=lambda storage, loc: storage,weights_only=False)
     coco_gt = COCO(ANNOTATION_FILE_PATH)
     print("文件加载完成。")
 
+    print("正在修正 GNN 结果字典的键类型...")
+    gnn_results = {
+        key.item() if isinstance(key, torch.Tensor) else int(key): value
+        for key, value in gnn_results_tensor_keys.items()
+    }
+    print("键类型修正完成。")
+
     os.makedirs(OUTPUT_VIS_DIR, exist_ok=True)
     print(f"对比可视化结果将保存到: {os.path.abspath(OUTPUT_VIS_DIR)}")
+
+    img_id_to_filename = {img_id: info['file_name'] for img_id, info in coco_gt.imgs.items()}
 
     # --- 准备标签映射 ---
     cat_ids = coco_gt.getCatIds(CLASS_NAMES)
@@ -224,7 +233,9 @@ def main():
 
     for i, img_id in enumerate(img_ids_in_gt):
         if img_id not in gnn_results:
+            print("1")
             continue
+
 
         # --- 1. 准备数据 ---
         img_info = gnn_results[img_id]
@@ -250,7 +261,7 @@ def main():
             })
 
         # --- 3. 分别评估 "Before" 和 "After" ---
-        results_train = evaluate_predictions_for_image(preds,gt_anns,coco_id_to_name, model_idx_to_name)
+        #results_train = evaluate_predictions_for_image(preds,gt_anns,coco_id_to_name, model_idx_to_name)
         results_before = evaluate_predictions_for_image(preds_before, gt_anns, coco_id_to_name, model_idx_to_name)
         results_after = evaluate_predictions_for_image(preds_after, gt_anns, coco_id_to_name, model_idx_to_name)
 
